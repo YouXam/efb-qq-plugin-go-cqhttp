@@ -162,7 +162,7 @@ class OICQHttp(BaseClient):
                 if len(resid):
                     resid = resid[0]
                 else:
-                    return "", [], [], None
+                    return [], [], None
                 forward_msgs = (await self.coolq_api_query("get_forward_msg", id=resid))
                 print(forward_msgs)
                 fmt_forward_msgs = await forward_msgs_wrapper(context, forward_msgs, chat, 1)
