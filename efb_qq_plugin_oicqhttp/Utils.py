@@ -656,10 +656,10 @@ def cq_get_image(image_link: str) -> Optional[IO]:  # Download image from QQ
         return None
     return file
 
-
-def async_send_messages_to_master(msg: Message):
+from typing import Optional
+def async_send_messages_to_master(msg: Message) -> Optional['Message']:
     try:
-        coordinator.send_message(msg)
+        return coordinator.send_message(msg)
     finally:
         if msg.file:
             msg.file.close()

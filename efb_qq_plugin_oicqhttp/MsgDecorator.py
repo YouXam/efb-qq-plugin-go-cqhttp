@@ -13,14 +13,14 @@ from ehforwarderbot.message import LinkAttribute, LocationAttribute, Substitutio
 from .Utils import cq_get_image, download_file, download_voice
 
 if TYPE_CHECKING:
-    from .GoCQHttp import GoCQHttp
+    from .OICQHttp import OICQHttp
 
 
 class QQMsgProcessor:
-    inst: "GoCQHttp"
+    inst: "OICQHttp"
     logger: logging.Logger = logging.getLogger(__name__)
 
-    def __init__(self, instance: "GoCQHttp"):
+    def __init__(self, instance: "OICQHttp"):
         self.inst = instance
         pass
 
@@ -181,6 +181,12 @@ class QQMsgProcessor:
         # there's no need to escape the special characters
         return "[CQ:record,file=base64://{}]".format(encoded_string.decode())
 
+    def qq_file_wrapper(self, data, n):
+        file = download_file(data["url"])
+        data['file'] = file
+        data['filename'] = data['name']
+        return self.qq_file_after_wrapper(data)
+
     def qq_file_after_wrapper(self, data):
         efb_msg = Message()
         efb_msg.file = data["file"]
@@ -191,7 +197,7 @@ class QQMsgProcessor:
         efb_msg.path = efb_msg.file.name
         efb_msg.mime = mime
         efb_msg.filename = data["filename"]
-        return efb_msg
+        return [efb_msg]
 
     def qq_group_broadcast_wrapper(self, data, chat: Chat):
         try:

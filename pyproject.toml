@@ -1,6 +1,6 @@
 [project]
-name = "efb-qq-plugin-go-cqhttp"
-description = "EQS plugin for Go-CQHttp API Compatible Client."
+name = "efb-qq-plugin-oicqhttp"
+description = "EQS plugin for oicqhttp API Compatible Client."
 authors = [{ name = "XYenon", email = "i@xyenon.bid" }]
 dependencies = [
     "efb-qq-slave @ git+https://github.com/milkice233/efb-qq-slave@master",
@@ -26,7 +26,8 @@ keywords = [
     "chatbot",
     "EQS",
     "CoolQ",
-    "go-cqhttp",
+    "oicq",
+    "cqhttp"
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -44,10 +45,10 @@ classifiers = [
 dynamic = ["version"]
 
 [project.urls]
-homepage = "https://github.com/ehForwarderBot/efb-qq-plugin-go-cqhttp"
+homepage = "https://github.com/youxam/efb-qq-plugin-oicqhttp"
 
 [project.entry-points."ehforwarderbot.qq.plugin"]
-GoCQHttp = "efb_qq_plugin_go_cqhttp:GoCQHttp"
+OICQHttp = "efb_qq_plugin_go_cqhttp:GoCQHttp"
 
 [build-system]
 requires = ["pdm-pep517"]

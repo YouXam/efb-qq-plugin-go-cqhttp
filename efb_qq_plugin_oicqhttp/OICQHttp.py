@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import uuid
+import re
 from datetime import datetime, timedelta
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
@@ -53,9 +54,9 @@ from .Utils import (
 )
 
 
-class GoCQHttp(BaseClient):
-    client_name: str = "GoCQHttp Client"
-    client_id: str = "GoCQHttp"
+class OICQHttp(BaseClient):
+    client_name: str = "OICQHttp Client"
+    client_id: str = "OICQHttp"
     client_config: Dict[str, Any]
 
     coolq_bot: CQHttp = None
@@ -73,6 +74,8 @@ class GoCQHttp(BaseClient):
     extra_group_list: List[Dict] = []
     repeat_counter = 0
     update_repeat_counter = 0
+    prev_message_list: List[str] = []
+    prev_message_dict = {}
 
     def __init__(self, client_id: str, config: Dict[str, Any], channel):
         super().__init__(client_id, config)
@@ -93,32 +96,34 @@ class GoCQHttp(BaseClient):
 
         asyncio.set_event_loop(self.loop)
 
-        async def forward_msgs_wrapper(msg_elements: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        async def forward_msgs_wrapper(context, msg_elements: List[Dict[str, Any]], chat, step) -> List[Dict[str, Any]]:
             fmt_msgs: List[Dict] = []
+            h = len(msg_elements)
             for msg in msg_elements:
-                from_user = await self.get_user_info(msg["sender"]["user_id"])
-                header_text = {"data": {"text": f'{from_user["remark"]}（{from_user["nickname"]}）：\n'}, "type": "text"}
-                footer_text = {"data": {"text": "\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
-                msg["content"].insert(0, header_text)
-                msg["content"].append(footer_text)
-                for i, inner_msg in enumerate(msg["content"]):
-                    if "content" in inner_msg:
-                        if i == 1:
-                            fmt_msgs.pop()
-                            msg["content"].pop()
-                        fmt_msgs += await forward_msgs_wrapper([inner_msg])
-                    else:
-                        fmt_msgs.append(inner_msg)
+                from_user = await self.get_user_info(msg["user_id"])
+                header_text = {"data": {"text": f'{from_user["nickname"]}：\n'}, "type": "text"}
+                footer_text = {"data": {"text": f"\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
+                msg["message"].insert(0, header_text)
+                if h > 1:
+                    msg["message"].append(footer_text)
+                else:
+                    msg["message"].append({"data": {"text": "\n"}, "type": "text"})
+                messages, _, _ = await message_elements_wrapper(context, msg["message"], chat, step + 1)
+                fmt_msgs += messages
+                h -= 1
             return fmt_msgs
 
         async def message_element_wrapper(
-            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat
-        ) -> Tuple[str, List[Message], List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]]]:
+            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat, step = 1
+        ) -> Tuple[List[Message], List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]], Any]:
+            if isinstance(msg_element, Message):
+                return [msg_element], [], None
             msg_type = msg_element["type"]
             msg_data = msg_element["data"]
             main_text: str = ""
             messages: List[Message] = []
             at_list: List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]] = []
+            target: Any = None
             if msg_type == "text":
                 main_text = msg_data["text"]
             elif msg_type == "face":
@@ -147,34 +152,41 @@ class GoCQHttp(BaseClient):
                     at_dict = ((substitution_begin, substitution_end), chat.self)
                     at_list.append(at_dict)
             elif msg_type == "reply":
-                ref_user = await self.get_user_info(msg_data["qq"])
-                main_text = (
-                    f'「{ref_user["remark"]}（{ref_user["nickname"]}）：{msg_data["text"]}」\n'
-                    "- - - - - - - - - - - - - - -\n"
-                )
-            elif msg_type == "forward":
-                forward_msgs = (await self.coolq_api_query("get_forward_msg", message_id=msg_data["id"]))["messages"]
-                logging.debug(f"Forwarded message: {forward_msgs}")
-                fmt_forward_msgs = await forward_msgs_wrapper(forward_msgs)
-                logging.debug(f"Formated forwarded message: {forward_msgs}")
-                header_msg = {"data": {"text": "合并转发消息开始\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
-                footer_msg = {"data": {"text": "合并转发消息结束"}, "type": "text"}
-                fmt_forward_msgs.insert(0, header_msg)
-                fmt_forward_msgs.append(footer_msg)
-                main_text, messages, _ = await message_elements_wrapper(context, fmt_forward_msgs, chat)
-                return main_text, messages, []
+                reply_target: Message = self.prev_message_dict.get(msg_data["id"])
+                if reply_target:
+                    target = reply_target
+                else:
+                    main_text = f'#{msg_data["id"]}」\n------------------------------\n'
+            elif msg_type == "xml" and msg_data["type"] == 35:
+                resid = re.findall(r"m_resid=\"(.+)\" m_fileName", msg_data['data'])
+                if len(resid):
+                    resid = resid[0]
+                else:
+                    return "", [], [], None
+                forward_msgs = (await self.coolq_api_query("get_forward_msg", id=resid))
+                print(forward_msgs)
+                fmt_forward_msgs = await forward_msgs_wrapper(context, forward_msgs, chat, 1)
+                fmt_forward_msgs.insert(0, {"type": "text", "data": {"text": f"----------{'>'*step} 转发开始 ----------\n"}})
+                fmt_forward_msgs.append({"type": "text", "data": {"text": f"----------{'>'*step} 转发结束 ----------\n"}})
+                messages, at_list, _ = await message_elements_wrapper(context, fmt_forward_msgs, chat, 1)
+                return messages, at_list, None
             else:
                 messages.extend(self.call_msg_decorator(msg_type, msg_data, chat))
-            return main_text, messages, at_list
+            if main_text != "":
+                messages.append(self.msg_decorator.qq_text_simple_wrapper(main_text, at_list))
+            return messages, at_list, target
 
         async def message_elements_wrapper(
-            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat
-        ) -> Tuple[str, List[Message], Dict[Tuple[int, int], Union[Chat, ChatMember]]]:
+            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat, step = 1
+        ) -> Tuple[List[Message], Dict[Tuple[int, int], Union[Chat, ChatMember]], Any]:
             messages: List[Message] = []
             main_text: str = ""
             at_dict: Dict[Tuple[int, int], Union[Chat, ChatMember]] = {}
+            target = None
             for msg_element in msg_elements:
-                sub_main_text, sub_messages, sub_at_list = await message_element_wrapper(context, msg_element, chat)
+                sub_messages, sub_at_list, target_ = await message_element_wrapper(context, msg_element, chat, step)
+                if target_:
+                    target = target_
                 main_text_len = len(main_text)
                 for at_tuple in sub_at_list:
                     pos = (
@@ -182,9 +194,22 @@ class GoCQHttp(BaseClient):
                         at_tuple[0][1] + main_text_len,
                     )
                     at_dict[pos] = at_tuple[1]
-                main_text += sub_main_text
                 messages.extend(sub_messages)
-            return main_text, messages, at_dict
+            # merge text messages
+            if len(messages) > 1:
+                res = []
+                text = ""
+                for msg in messages:
+                    if msg.text != "":
+                        text += msg.text
+                    else:
+                        res.append(self.msg_decorator.qq_text_simple_wrapper(text, at_dict))
+                        res.append(msg)
+                        text = ""
+                if text != "":
+                    res.append(self.msg_decorator.qq_text_simple_wrapper(text, at_dict))
+                messages = res
+            return messages, at_dict, target
 
         @self.coolq_bot.on_message
         async def handle_msg(context: Event):
@@ -229,10 +254,18 @@ class GoCQHttp(BaseClient):
                 else:  # anonymous user in group
                     author = self.chat_manager.build_efb_chat_as_anonymous_user(chat, context)
 
-                main_text, messages, at_dict = await message_elements_wrapper(context, msg_elements, chat)
-
-                if main_text != "":
-                    messages.append(self.msg_decorator.qq_text_simple_wrapper(main_text, at_dict))
+                messages, at_dict, target = await message_elements_wrapper(context, msg_elements, chat)
+                if target is not None:
+                    if msg_elements[0].get("type") == "reply":
+                        msg_elements = msg_elements[1:]
+                    if msg_elements[0].get("type") == "at" and msg_elements[0]['data']['qq'] == target['sender']['user_id']:
+                        msg_elements = msg_elements[1:]
+                    messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
+                elif msg_elements[0].get("type") == "reply":
+                    msg_elements = msg_elements[1:]
+                    if len(msg_elements) >= 3 and msg_elements[0].get("type") == "at" and msg_elements[2].get("type") == "at" and msg_elements[0]['data']['qq'] == msg_elements[2]['data']['qq']:
+                        msg_elements = msg_elements[2:]
+                    messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
                 coolq_msg_id = context["message_id"]
                 for i in range(len(messages)):
                     if not isinstance(messages[i], Message):
@@ -245,24 +278,36 @@ class GoCQHttp(BaseClient):
                     )
                     efb_msg.chat = chat
                     efb_msg.author = author
+                    if target:
+                        efb_msg.target = target['message']
                     # if qq_uid != '80000000':
 
                     # Append discuss group into group list
                     if context["message_type"] == "discuss" and efb_msg.chat not in self.discuss_list:
                         self.discuss_list.append(efb_msg.chat)
-
                     efb_msg.deliver_to = coordinator.master
                     async_send_messages_to_master(efb_msg)
+                    self.prev_message_list.append(context['message_id'])
+                    self.prev_message_dict[context['message_id']] = {
+                        "message_id": context['message_id'],
+                        "sender": context['sender'],
+                        "message": efb_msg
+                    }
+                    if len(self.prev_message_list) > 1000:
+                        for msg_id in self.prev_message_list[:100]:
+                            self.prev_message_dict.pop(msg_id)
+                self.prev_message_list = self.prev_message_list[-900:]
+                    # efb_msg.edit
 
             asyncio.create_task(_handle_msg())
 
         @self.coolq_bot.on_notice("group_increase")
         async def handle_group_increase_msg(context: Event):
-            context["event_description"] = "\u2139 Group Member Increase Event"
-            if (context["sub_type"]) == "invite":
-                text = "{nickname}({context[user_id]}) joined the group({group_name}) via invitation"
+            context["event_description"] = "\u2139 群成员增加"
+            if (context.get("sub_type")) == "invite":
+                text = "{nickname}({context[user_id]}) 通过邀请加入群({group_name})"
             else:
-                text = "{nickname}({context[user_id]}) joined the group({group_name})"
+                text = "{nickname}({context[user_id]}) 加入群({group_name})"
 
             original_group = await self.get_group_info(context["group_id"], False)
             group_name = context["group_id"]
@@ -279,19 +324,19 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("group_decrease")
         async def handle_group_decrease_msg(context: Event):
-            context["event_description"] = "\u2139 Group Member Decrease Event"
+            context["event_description"] = "\u2139 群成员减少"
             original_group = await self.get_group_info(context["group_id"], False)
             group_name = context["group_id"]
             if original_group is not None and "group_name" in original_group:
                 group_name = original_group["group_name"]
             text = ""
             if context["sub_type"] == "kick_me":
-                text = ("You've been kicked from the group({})").format(group_name)
+                text = ("你被移出了群组({})").format(group_name)
             else:
                 if context["sub_type"] == "leave":
-                    text = "{nickname}({context[user_id]}) quited the group({group_name})"
+                    text = "{nickname}({context[user_id]}) 退出了群组({group_name})"
                 else:
-                    text = "{nickname}({context[user_id]}) was kicked from the group({group_name})"
+                    text = "{nickname}({context[user_id]}) 被移出了群({group_name})"
                 text = text.format(
                     nickname=(await self.get_stranger_info(context["user_id"]))["nickname"],
                     context=context,
@@ -302,11 +347,11 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("group_admin")
         async def handle_group_admin_msg(context: Event):
-            context["event_description"] = "\u2139 Group Admin Change Event"
+            context["event_description"] = "\u2139 群管理员变动"
             if (context["sub_type"]) == "set":
-                text = "{nickname}({context[user_id]}) has been appointed as the group({group_name}) administrator"
+                text = "{nickname}({context[user_id]}) 成为了群({group_name}) 的管理员"
             else:
-                text = "{nickname}({context[user_id]}) has been de-appointed as the group({group_name}) administrator"
+                text = "{nickname}({context[user_id]}) 被撤销了群({group_name}) 的管理员"
 
             original_group = await self.get_group_info(context["group_id"], False)
             group_name = context["group_id"]
@@ -323,19 +368,17 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("group_ban")
         async def handle_group_ban_msg(context: Event):
-            context["event_description"] = "\u2139 Group Member Restrict Event"
+            context["event_description"] = "\u2139 群禁言"
             if (context["sub_type"]) == "ban":
                 text = (
                     "{nickname}({context[user_id]}) "
-                    "is restricted for speaking for {time} at the group({group_name}) by "
-                    "{nickname_}({context[operator_id]})"
+                    "在群({group_name}) 被 {nickname_}({context[operator_id]}) 禁言了 {time}。"
                 )
                 time_text = strf_time(context["duration"])
             else:
                 text = (
                     "{nickname}({context[user_id]}) "
-                    "is lifted from restrictions at the group({group_name}) by "
-                    "{nickname_}({context[operator_id]}){time}"
+                    "在群({group_name}) 被 {nickname_}({context[operator_id]}){time} 解除了禁言。"
                 )
                 time_text = ""
 
@@ -357,11 +400,11 @@ class GoCQHttp(BaseClient):
         @self.coolq_bot.on_notice("offline_file")
         async def handle_offline_file_upload_msg(context: Event):
             async def _handle_offline_file_upload_msg():
-                context["event_description"] = "\u2139 Offline File Upload Event"
+                context["event_description"] = "\u2139 离线文件上传"
                 context["uid_prefix"] = "offline_file"
-                file_info_msg = ("Filename: {file[name]}\n" "File size: {file[size]}").format(file=context["file"])
+                file_info_msg = ("文件名: {file[name]}\n" "文件大小: {file[size]}").format(file=context["file"])
                 user = await self.get_user_info(context["user_id"])
-                text = "{remark}({nickname}) uploaded a file to you\n"
+                text = "{remark}({nickname}) 给你发送了文件\n"
                 text = text.format(remark=user["remark"], nickname=user["nickname"]) + file_info_msg
                 context["message"] = text
                 self.send_msg_to_master(context)
@@ -376,21 +419,21 @@ class GoCQHttp(BaseClient):
         @self.coolq_bot.on_notice("group_upload")
         async def handle_group_file_upload_msg(context: Event):
             async def _handle_group_file_upload_msg():
-                context["event_description"] = "\u2139 Group File Upload Event"
+                context["event_description"] = "\u2139 群文件上传"
                 context["uid_prefix"] = "group_upload"
                 original_group = await self.get_group_info(context["group_id"], False)
                 group_name = context["group_id"]
                 if original_group is not None and "group_name" in original_group:
                     group_name = original_group["group_name"]
 
-                file_info_msg = ("File ID: {file[id]}\n" "Filename: {file[name]}\n" "File size: {file[size]}").format(
+                file_info_msg = ("File ID: {file[id]}\n" "文件名: {file[name]}\n" "文件大小: {file[size]}").format(
                     file=context["file"]
                 )
                 member_info = (await self.get_user_info(context["user_id"], group_id=context["group_id"]))[
                     "in_group_info"
                 ]
                 group_card = member_info["card"] if member_info["card"] != "" else member_info["nickname"]
-                text = "{member_card}({context[user_id]}) uploaded a file to group({group_name})\n"
+                text = "{member_card}({context[user_id]}) 上传了文件到群({group_name})\n"
                 text = text.format(member_card=group_card, context=context, group_name=group_name) + file_info_msg
                 context["message"] = text
                 await self.send_efb_group_notice(context)
@@ -407,9 +450,9 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("friend_add")
         async def handle_friend_add_msg(context: Event):
-            context["event_description"] = "\u2139 New Friend Event"
+            context["event_description"] = "\u2139 好友添加"
             context["uid_prefix"] = "friend_add"
-            text = "{nickname}({context[user_id]}) has become your friend!"
+            text = "{nickname}({context[user_id]}) 添加了你为好友"
             text = text.format(
                 nickname=(await self.get_stranger_info(context["user_id"]))["nickname"],
                 context=context,
@@ -443,11 +486,11 @@ class GoCQHttp(BaseClient):
         @self.coolq_bot.on_request("friend")  # Add friend request
         async def handle_add_friend_request(context: Event):
             self.logger.debug(repr(context))
-            context["event_description"] = "\u2139 New Friend Request"
+            context["event_description"] = "\u2139 好友添加请求"
             context["uid_prefix"] = "friend_request"
             text = (
-                "{nickname}({context[user_id]}) wants to be your friend!\n"
-                "Here is the verification comment:\n"
+                "{nickname}({context[user_id]}) 想成为你的好友!\n"
+                "验证消息:\n"
                 "{context[comment]}"
             )
             text = text.format(
@@ -457,12 +500,12 @@ class GoCQHttp(BaseClient):
             context["message"] = text
             commands = [
                 MessageCommand(
-                    name=("Accept"),
+                    name=("同意"),
                     callable_name="process_friend_request",
                     kwargs={"result": "accept", "flag": context["flag"]},
                 ),
                 MessageCommand(
-                    name=("Decline"),
+                    name=("拒绝"),
                     callable_name="process_friend_request",
                     kwargs={"result": "decline", "flag": context["flag"]},
                 ),
@@ -479,7 +522,7 @@ class GoCQHttp(BaseClient):
             group_name = group_id = context["group_id"]
             context["group_id"] = str(group_id) + "_notification"
             context["message_type"] = "group"
-            context["event_description"] = "\u2139 New Group Join Request"
+            context["event_description"] = "\u2139 新的入群申请"
             original_group = await self.get_group_info(group_id, False)
             if original_group is not None and "group_name" in original_group:
                 group_name = original_group["group_name"]
@@ -501,13 +544,13 @@ class GoCQHttp(BaseClient):
                     (await self.get_stranger_info(context["user_id"]))["nickname"],
                     context["user_id"],
                 )
-            msg.text = "{} wants to join the group {}({}). \nHere is the comment: {}".format(
+            msg.text = "{} 想加入群 {}({}). \n验证消息\n: {}".format(
                 name, group_name, group_id, context["comment"]
             )
             msg.commands = MessageCommands(
                 [
                     MessageCommand(
-                        name="Accept",
+                        name="同意",
                         callable_name="process_group_request",
                         kwargs={
                             "result": "accept",
@@ -516,7 +559,7 @@ class GoCQHttp(BaseClient):
                         },
                     ),
                     MessageCommand(
-                        name="Decline",
+                        name="拒绝",
                         callable_name="process_group_request",
                         kwargs={
                             "result": "decline",
@@ -553,15 +596,15 @@ class GoCQHttp(BaseClient):
         self.t.start()
 
     def relogin(self):
-        raise NotImplementedError
+        self.login()
 
     def logout(self):
         raise NotImplementedError
 
-    @extra(
-        name=("Check CoolQ Status"),
-        desc=("Force efb-qq-slave to refresh status from CoolQ Client.\n" "Usage: {function_name}"),
-    )
+    # @extra(
+    #     name=("Check CoolQ Status"),
+    #     desc=("Force efb-qq-slave to refresh status from CoolQ Client.\n" "Usage: {function_name}"),
+    # )
     def login(self, param: str = ""):
         asyncio.run(self.check_status_periodically(run_once=True))
         return "Done"
@@ -824,7 +867,7 @@ class GoCQHttp(BaseClient):
 
     async def check_running_status(self):
         res = await self._coolq_api_wrapper("get_status")
-        if res["good"] or res["online"]:
+        if res.get("good") or res.get("online"):
             return True
         else:
             raise CoolQOfflineException(("CoolQ Client isn't working correctly!"))
@@ -997,6 +1040,8 @@ class GoCQHttp(BaseClient):
     # As the old saying goes
     # A programmer spent 20% of time on coding
     # while the rest 80% on considering a variable/function/class name
+
+    # 
     async def get_external_group_info(self, group_id):  # Special thanks to @lwl12 for thinking of this name
         res = await self.coolq_api_query("get_group_info", group_id=group_id)
         return res
@@ -1065,7 +1110,7 @@ class GoCQHttp(BaseClient):
             context["message_type"] = "group"
             efb_msg = self.msg_decorator.qq_file_after_wrapper(data)
             efb_msg.uid = str(context["user_id"]) + "_" + str(uuid.uuid4()) + "_" + str(1)
-            efb_msg.text = "Sent a file\n{}".format(context["file"]["name"])
+            efb_msg.text = "发送了一个文件\n{}".format(context["file"]["name"])
             if context["uid_prefix"] == "offline_file":
                 efb_msg.chat = await self.chat_manager.build_efb_chat_as_private(context)
             elif context["uid_prefix"] == "group_upload":
