@@ -76,6 +76,7 @@ class OICQHttp(BaseClient):
     update_repeat_counter = 0
     prev_message_list: List[str] = []
     prev_message_dict = {}
+    user_id: int = 0
 
     def __init__(self, client_id: str, config: Dict[str, Any], channel):
         super().__init__(client_id, config)
@@ -102,7 +103,7 @@ class OICQHttp(BaseClient):
             for msg in msg_elements:
                 from_user = await self.get_user_info(msg["user_id"])
                 header_text = {"data": {"text": f'{from_user["nickname"]}：\n'}, "type": "text"}
-                footer_text = {"data": {"text": f"\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
+                footer_text = {"data": {"text": "\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
                 msg["message"].insert(0, header_text)
                 if h > 1:
                     msg["message"].append(footer_text)
@@ -114,7 +115,7 @@ class OICQHttp(BaseClient):
             return fmt_msgs
 
         async def message_element_wrapper(
-            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat, step = 1
+            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat, step=1
         ) -> Tuple[List[Message], List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]], Any]:
             if isinstance(msg_element, Message):
                 return [msg_element], [], None
@@ -173,25 +174,30 @@ class OICQHttp(BaseClient):
             else:
                 messages.extend(self.call_msg_decorator(msg_type, msg_data, chat))
             if main_text != "":
-                messages.append(self.msg_decorator.qq_text_simple_wrapper(main_text, at_list))
+                at_dict = {}
+                for at_tuple in at_list:
+                    pos = (
+                        at_tuple[0][0],
+                        at_tuple[0][1],
+                    )
+                    at_dict[pos] = at_tuple[1]
+                messages.append(self.msg_decorator.qq_text_simple_wrapper(main_text, at_dict))
             return messages, at_list, target
 
         async def message_elements_wrapper(
-            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat, step = 1
+            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat, step=1
         ) -> Tuple[List[Message], Dict[Tuple[int, int], Union[Chat, ChatMember]], Any]:
             messages: List[Message] = []
-            main_text: str = ""
             at_dict: Dict[Tuple[int, int], Union[Chat, ChatMember]] = {}
             target = None
             for msg_element in msg_elements:
                 sub_messages, sub_at_list, target_ = await message_element_wrapper(context, msg_element, chat, step)
                 if target_:
                     target = target_
-                main_text_len = len(main_text)
                 for at_tuple in sub_at_list:
                     pos = (
-                        at_tuple[0][0] + main_text_len,
-                        at_tuple[0][1] + main_text_len,
+                        at_tuple[0][0],
+                        at_tuple[0][1],
                     )
                     at_dict[pos] = at_tuple[1]
                 messages.extend(sub_messages)
@@ -297,7 +303,7 @@ class OICQHttp(BaseClient):
                         for msg_id in self.prev_message_list[:100]:
                             self.prev_message_dict.pop(msg_id)
                 self.prev_message_list = self.prev_message_list[-900:]
-                    # efb_msg.edit
+                # efb_msg.edit
 
             asyncio.create_task(_handle_msg())
 
@@ -462,6 +468,8 @@ class OICQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("group_recall")
         async def handle_group_recall_msg(context: Event):
+            if context["operator_id"] == await self.get_qq_uid():
+                return
             coolq_msg_id = context["message_id"]
             chat = GroupChat(channel=self.channel, uid=f"group_{context['group_id']}")
 
@@ -472,6 +480,8 @@ class OICQHttp(BaseClient):
 
         @self.coolq_bot.on_notice("friend_recall")
         async def handle_friend_recall_msg(context: Event):
+            if context["operator_id"] == await self.get_qq_uid():
+                return
             coolq_msg_id = context["message_id"]
 
             try:
@@ -601,11 +611,14 @@ class OICQHttp(BaseClient):
     def logout(self):
         raise NotImplementedError
 
-    # @extra(
-    #     name=("Check CoolQ Status"),
-    #     desc=("Force efb-qq-slave to refresh status from CoolQ Client.\n" "Usage: {function_name}"),
-    # )
+    @extra(
+        name=("Check CoolQ Status"),
+        desc=("Force efb-qq-slave to refresh status from CoolQ Client.\n" "Usage: {function_name}"),
+    )
     def login(self, param: str = ""):
+        """
+        test
+        """
         asyncio.run(self.check_status_periodically(run_once=True))
         return "Done"
 
@@ -617,6 +630,7 @@ class OICQHttp(BaseClient):
         res = await self.coolq_bot.get_status()
         if "good" in res or "online" in res:
             data = await self.coolq_bot.get_login_info()
+            self.user_id = data["user_id"]
             return {
                 "status": 0,
                 "data": {"uid": data["user_id"], "nickname": data["nickname"]},
@@ -693,7 +707,7 @@ class OICQHttp(BaseClient):
                 asyncio.run(self.recall_message(uid_type[1]))
             except CoolQAPIFailureException:
                 raise EFBOperationNotSupported(
-                    ("Failed to recall the message!\n" "This message may have already expired.")
+                    ("撤回消息失败：可能消息已过期。")
                 )
 
         if msg.type in [MsgType.Text, MsgType.Link]:
@@ -761,6 +775,8 @@ class OICQHttp(BaseClient):
             return func(*args)
 
     async def get_qq_uid(self):
+        if self.user_id:
+            return self.user_id
         res = await self.get_login_info()
         if res["status"] == 0:
             return res["data"]["uid"]
@@ -1048,13 +1064,13 @@ class OICQHttp(BaseClient):
 
     def send_status(self, status: "Status"):
         if isinstance(status, MessageRemoval):
-            if not isinstance(status.message.author, SelfChatMember):
-                raise EFBMessageError(("You can only recall your own messages."))
+            # if not isinstance(status.message.author, SelfChatMember):
+            #     raise EFBMessageError(("You can only recall your own messages."))
             try:
                 uid_type = status.message.uid.split("_")
                 asyncio.run(self.recall_message(uid_type[1]))
             except CoolQAPIFailureException:
-                raise EFBMessageError(("Failed to recall the message. This message may have already expired."))
+                raise EFBMessageError(("撤回消息失败：无权限或消息已过期。"))
         else:
             raise EFBOperationNotSupported()
         # todo
