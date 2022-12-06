@@ -13,14 +13,14 @@ from ehforwarderbot.message import LinkAttribute, LocationAttribute, Substitutio
 from .Utils import cq_get_image, download_file, download_voice
 
 if TYPE_CHECKING:
-    from .OICQHttp import OICQHttp
+    from .GoCQHttp import GoCQHttp
 
 
 class QQMsgProcessor:
-    inst: "OICQHttp"
+    inst: "GoCQHttp"
     logger: logging.Logger = logging.getLogger(__name__)
 
-    def __init__(self, instance: "OICQHttp"):
+    def __init__(self, instance: "GoCQHttp"):
         self.inst = instance
         pass
 
