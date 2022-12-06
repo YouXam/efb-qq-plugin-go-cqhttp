@@ -60,7 +60,11 @@ class QQMsgProcessor:
         efb_msg = Message()
         try:
             efb_msg.type = MsgType.Audio
-            efb_msg.file = download_voice(data["url"])
+            efb_msg.file = download_voice(data["file"])
+            if efb_msg.file is None:
+                efb_msg.type = MsgType.Unsupported
+                efb_msg.text = "[Voice Message] Please check it on your QQ."
+                return [efb_msg]
             mime = magic.from_file(efb_msg.file.name, mime=True)
             if isinstance(mime, bytes):
                 mime = mime.decode()
@@ -181,7 +185,7 @@ class QQMsgProcessor:
         # there's no need to escape the special characters
         return "[CQ:record,file=base64://{}]".format(encoded_string.decode())
 
-    def qq_file_wrapper(self, data, n):
+    def qq_file_wrapper(self, data):
         file = download_file(data["url"])
         data['file'] = file
         data['filename'] = data['name']
@@ -197,7 +201,7 @@ class QQMsgProcessor:
         efb_msg.path = efb_msg.file.name
         efb_msg.mime = mime
         efb_msg.filename = data["filename"]
-        return [efb_msg]
+        return efb_msg
 
     def qq_group_broadcast_wrapper(self, data, chat: Chat):
         try:

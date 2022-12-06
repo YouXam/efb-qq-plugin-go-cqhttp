@@ -656,7 +656,7 @@ def cq_get_image(image_link: str) -> Optional[IO]:  # Download image from QQ
         return None
     return file
 
-from typing import Optional
+
 def async_send_messages_to_master(msg: Message) -> Optional['Message']:
     try:
         return coordinator.send_message(msg)
@@ -750,6 +750,8 @@ def download_group_avatar(uid: str):
 
 
 def download_voice(voice_url: str):
+    if voice_url.startswith("protobuf"):
+        return None
     try:
         resp = requests.get(voice_url)
         origin_file = tempfile.NamedTemporaryFile()

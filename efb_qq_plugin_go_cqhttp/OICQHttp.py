@@ -48,7 +48,6 @@ from .Utils import (
     download_file,
     download_group_avatar,
     download_user_avatar,
-    process_quote_text,
     qq_emoji_list,
     strf_time,
 )
@@ -76,6 +75,9 @@ class OICQHttp(BaseClient):
     update_repeat_counter = 0
     prev_message_list: List[str] = []
     prev_message_dict = {}
+
+    # coolq_prev_message_list: List[str] = []
+    # coolq_prev_message_dict = {}
     user_id: int = 0
 
     def __init__(self, client_id: str, config: Dict[str, Any], channel):
@@ -96,6 +98,9 @@ class OICQHttp(BaseClient):
         self.shutdown_event = asyncio.Event()
 
         asyncio.set_event_loop(self.loop)
+
+        async def get_msg(id):
+            return await self.coolq_api_query("get_msg", message_id=id)
 
         async def forward_msgs_wrapper(context, msg_elements: List[Dict[str, Any]], chat, step) -> List[Dict[str, Any]]:
             fmt_msgs: List[Dict] = []
@@ -157,7 +162,17 @@ class OICQHttp(BaseClient):
                 if reply_target:
                     target = reply_target
                 else:
-                    main_text = f'#{msg_data["id"]}」\n------------------------------\n'
+                    try:
+                        target_msg = await get_msg(msg_data["id"])
+                        target = {
+                            "message": Message(chat=chat, uid=MessageID(f"{chat.uid.split('_')[-1]}_{msg_data['id']}")),
+                            "sender": target_msg['sender'],
+                            "message_id": msg_data["id"],
+                        }
+                    except Exception as e:
+                        self.logger.exception(e)
+                        main_text = f'#{msg_data["id"]}」\n------------------------------\n'
+                        target = None
             elif msg_type == "xml" and msg_data["type"] == 35:
                 resid = re.findall(r"m_resid=\"(.+)\" m_fileName", msg_data['data'])
                 if len(resid):
@@ -165,7 +180,6 @@ class OICQHttp(BaseClient):
                 else:
                     return [], [], None
                 forward_msgs = (await self.coolq_api_query("get_forward_msg", id=resid))
-                print(forward_msgs)
                 fmt_forward_msgs = await forward_msgs_wrapper(context, forward_msgs, chat, 1)
                 fmt_forward_msgs.insert(0, {"type": "text", "data": {"text": f"----------{'>'*step} 转发开始 ----------\n"}})
                 fmt_forward_msgs.append({"type": "text", "data": {"text": f"----------{'>'*step} 转发结束 ----------\n"}})
@@ -239,7 +253,7 @@ class OICQHttp(BaseClient):
                 if "anonymous" not in context or context["anonymous"] is None:
                     if context["message_type"] == "group":
                         if context["sub_type"] == "notice":
-                            context["event_description"] = "System Notification"
+                            context["event_description"] = "系统通知"
                             context["uid_prefix"] = "group_notification"
                             author = chat.add_system_member(
                                 name=context["event_description"],
@@ -266,6 +280,8 @@ class OICQHttp(BaseClient):
                         msg_elements = msg_elements[1:]
                     if msg_elements[0].get("type") == "at" and msg_elements[0]['data']['qq'] == target['sender']['user_id']:
                         msg_elements = msg_elements[1:]
+                    if msg_elements[0].get("type") == "text" and msg_elements[0]['data']['text'].startswith(" "):
+                        msg_elements[0]['data']['text'] = msg_elements[0]['data']['text'].lstrip()
                     messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
                 elif msg_elements[0].get("type") == "reply":
                     msg_elements = msg_elements[1:]
@@ -687,19 +703,12 @@ class OICQHttp(BaseClient):
 
     def send_message(self, msg: "Message") -> "Message":
         # todo Add support for edited message
-        """
-        self.logger.info("[%s] Sending message to WeChat:\n"
-                         "uid: %s\n"
-                         "Type: %s\n"
-                         "Text: %s\n"
-                         "Target Chat: %s\n"
-                         "Target uid: %s\n",
-                         msg.uid,
-                         msg.chat.chat_uid, msg.type, msg.text, repr(msg.target.chat), msg.target.uid)
-        """
         m = QQMsgProcessor(instance=self)
         chat_type = msg.chat.uid.split("_")
-
+        reply_cq = ''
+        if msg.target is not None:
+            target_id = msg.target.uid.split("_")[1]
+            reply_cq = f'[CQ:reply,id={target_id}]'
         self.logger.debug("[%s] Is edited: %s", msg.uid, msg.edit)
         if msg.edit:
             try:
@@ -709,27 +718,22 @@ class OICQHttp(BaseClient):
                 raise EFBOperationNotSupported(
                     ("撤回消息失败：可能消息已过期。")
                 )
-
         if msg.type in [MsgType.Text, MsgType.Link]:
             if msg.text == "kick`":
                 group_id = chat_type[1]
                 user_id = msg.target.author.uid
                 asyncio.run(self.coolq_api_query("set_group_kick", group_id=group_id, user_id=user_id))
             else:
+                rmsg = msg.text
                 if isinstance(msg.target, Message):
-                    max_length = 50
-                    tgt_text = coolq_text_encode(process_quote_text(msg.target.text, max_length))
                     tgt_alias = ""
                     if chat_type[0] != "private" and not isinstance(msg.target.author, SelfChatMember):
                         tgt_alias += m.coolq_code_at_wrapper(msg.target.author.uid)
                     else:
                         tgt_alias = ""
-                    msg.text = "%s%s\n\n%s" % (
-                        tgt_alias,
-                        tgt_text,
-                        coolq_text_encode(msg.text),
-                    )
-                msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], msg.text))
+                    msg.text = coolq_text_encode(msg.text)
+                    rmsg = reply_cq + tgt_alias + ('' if self.client_config.get("remove_reply_at", False) else tgt_alias) + msg.text
+                msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], rmsg))
                 self.logger.debug("[%s] Sent as a text message. %s", msg.uid, msg.text)
         elif msg.type in (MsgType.Image, MsgType.Sticker, MsgType.Animation):
             self.logger.info("[%s] Image/Sticker/Animation %s", msg.uid, msg.type)
@@ -752,16 +756,37 @@ class OICQHttp(BaseClient):
                     text += m.coolq_code_image_wrapper(f, f.name)
             if msg.text:
                 msg.uid = asyncio.run(
-                    self.coolq_send_message(chat_type[0], chat_type[1], text + coolq_text_encode(msg.text))
+                    self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + text + coolq_text_encode(msg.text))
                 )
             else:
-                msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], text))
+                msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + text))
         # todo More MsgType Support
         elif msg.type is MsgType.Voice:
             text = m.coolq_voice_image_wrapper(msg.file, msg.path)
-            msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], text))
+            msg.uid = asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + text))
             if msg.text:
-                asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], msg.text))
+                asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + msg.text))
+        elif msg.type is MsgType.File:
+            file = msg.file
+            if file.closed:
+                file = open(msg.file.name)
+            filedata = file.read()
+            tmpFilename = tempfile.mktemp()
+            with open(tmpFilename, 'wb') as f:
+                f.write(filedata)
+            asyncio.run(self.coolq_send_file(chat_type[0], chat_type[1], tmpFilename, msg.filename))
+            if msg.text:
+                asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + msg.text))
+        elif msg.type is MsgType.Video:
+            file = msg.file
+            if file.closed:
+                file = open(msg.file.name)
+            filedata = file.read()
+            tmpFilename = tempfile.mktemp()
+            with open(tmpFilename, 'wb') as f:
+                f.write(filedata)
+            rtext = '[CQ:video,file=file:///%s]' % tmpFilename
+            asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + rtext))
         return msg
 
     def call_msg_decorator(self, msg_type: str, *args) -> List[Message]:
@@ -862,6 +887,15 @@ class OICQHttp(BaseClient):
         keyword = msg_type if msg_type != "private" else "user"
         res = await self.coolq_api_query("send_msg", message_type=msg_type, **{keyword + "_id": uid}, message=message)
         return str(uid) + "_" + str(res["message_id"])
+
+    async def coolq_send_file(self, msg_type, uid, filepath, filename):
+        if msg_type == "private":
+            res = await self.coolq_api_query("upload_private_file", user_id=uid, file=filepath, name=filename)
+        elif msg_type == "group":
+            res = await self.coolq_api_query("upload_group_file", group_id=uid, file=filepath, name=filename)
+        else:
+            raise CoolQAPIFailureException("Unsupported message type.")
+        return str(uid) + "_" + str(res and res.get("message_id", '') or '')
 
     async def _coolq_api_wrapper(self, func_name, **kwargs):
         try:
@@ -1057,7 +1091,6 @@ class OICQHttp(BaseClient):
     # A programmer spent 20% of time on coding
     # while the rest 80% on considering a variable/function/class name
 
-    # 
     async def get_external_group_info(self, group_id):  # Special thanks to @lwl12 for thinking of this name
         res = await self.coolq_api_query("get_group_info", group_id=group_id)
         return res
