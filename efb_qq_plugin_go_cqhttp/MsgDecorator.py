@@ -157,8 +157,10 @@ class QQMsgProcessor:
             efb_msg.text = data["text"]
         return [efb_msg]  # todo Port for other music platform
 
-    def qq_text_simple_wrapper(self, text: str, ats: dict):  # This cute function only accepts string!
+    def qq_text_simple_wrapper(self, text: str, ats: dict, forward=False):  # This cute function only accepts string!
         efb_msg = Message()
+        if forward:
+            efb_msg.vendor_specific['disable_header'] = True
         efb_msg.type = MsgType.Text
         efb_msg.text = text
         if ats:  # This is used to replace specific text with @blahblah

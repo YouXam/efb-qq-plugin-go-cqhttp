@@ -5,7 +5,6 @@ import tempfile
 import threading
 import time
 import uuid
-import re
 from datetime import datetime, timedelta
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple, Union
 
@@ -82,7 +81,6 @@ class GoCQHttp(BaseClient):
 
     def __init__(self, client_id: str, config: Dict[str, Any], channel):
         super().__init__(client_id, config)
-        print(config)
         self.client_config = config[self.client_id]
         self.coolq_bot = CQHttp(
             api_root=self.client_config["api_root"],
@@ -106,25 +104,47 @@ class GoCQHttp(BaseClient):
         async def forward_msgs_wrapper(context, msg_elements: List[Dict[str, Any]], chat, step) -> List[Dict[str, Any]]:
             fmt_msgs: List[Dict] = []
             h = len(msg_elements)
+            # merge messages from same user
+            if len(msg_elements) >= 1:
+                res = []
+                sender = 0
+                for msg in msg_elements:
+                    if sender == msg["sender"]["user_id"]:
+                        if len(msg["content"]) > 0 and msg["content"][0].get('content'):
+                            res[-1]["content"] += [{"data": {"text": '\n ' + '●' * step + '[内嵌聊天记录]\n'}, "type": "text"}] + msg["content"]
+                        else:
+                            res[-1]["content"] += [{"data": {"text": '\n ' + '●' * step + ' '}, "type": "text"}] + msg["content"]
+                    else:
+                        if len(res) > 0:
+                            res[-1]["content"] += [{"data": {"text": '\n'}, "type": "text"}]
+                        if len(msg["content"]) > 0 and msg["content"][0].get('content'):
+                            msg["content"] = [{"data": {"text": ' ' + '●' * step + '[内嵌聊天记录]\n'}, "type": "text"}] + msg["content"]
+                        else:
+                            msg["content"] = [{"data": {"text": ' ' + '●' * step + ' '}, "type": "text"}] + msg["content"]
+                        res.append(msg)
+                        sender = msg["sender"]["user_id"]
+                msg_elements = res
             for msg in msg_elements:
-                from_user = await self.get_user_info(msg["user_id"])
-                header_text = {"data": {"text": f'{from_user["nickname"]}：\n'}, "type": "text"}
-                footer_text = {"data": {"text": "\n- - - - - - - - - - - - - - -\n"}, "type": "text"}
-                msg["message"].insert(0, header_text)
-                if h > 1:
-                    msg["message"].append(footer_text)
+                from_user = msg["sender"]
+                if msg['content'][0].get('type') == 'text':
+                    msg['content'][0]['data']['text'] = f'{from_user["nickname"]}：\n' + msg['content'][0]['data']['text']
                 else:
-                    msg["message"].append({"data": {"text": "\n"}, "type": "text"})
-                messages, _, _ = await message_elements_wrapper(context, msg["message"], chat, step + 1)
+                    msg["content"].insert(0, {"data": {"text": f'{from_user["nickname"]}：\n'}, "type": "text"})
+                if h == 1:
+                    msg["content"].append({"data": {"text": "\n"}, "type": "text"})
+                messages, _, _ = await message_elements_wrapper(context, msg["content"], chat, step + 1, True)
                 fmt_msgs += messages
                 h -= 1
             return fmt_msgs
 
         async def message_element_wrapper(
-            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat, step=1
+            context: Dict[str, Any], msg_element: Dict[str, Any], chat: Chat, step=1, forward=False
         ) -> Tuple[List[Message], List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]], Any]:
             if isinstance(msg_element, Message):
                 return [msg_element], [], None
+            if msg_element.get("type") is None and msg_element.get("content"):
+                fmt_forward_msgs = await forward_msgs_wrapper(context, [msg_element], chat, step)
+                return fmt_forward_msgs, [], None
             msg_type = msg_element["type"]
             msg_data = msg_element["data"]
             main_text: str = ""
@@ -174,18 +194,13 @@ class GoCQHttp(BaseClient):
                         self.logger.exception(e)
                         main_text = f'#{msg_data["id"]}」\n------------------------------\n'
                         target = None
-            elif msg_type == "xml" and msg_data["type"] == 35:
-                resid = re.findall(r"m_resid=\"(.+)\" m_fileName", msg_data['data'])
-                if len(resid):
-                    resid = resid[0]
-                else:
-                    return [], [], None
+            elif msg_type == "forward":
+                resid = msg_data['id']
                 forward_msgs = (await self.coolq_api_query("get_forward_msg", id=resid))
-                fmt_forward_msgs = await forward_msgs_wrapper(context, forward_msgs, chat, 1)
-                fmt_forward_msgs.insert(0, {"type": "text", "data": {"text": f"----------{'>'*step} 转发开始 ----------\n"}})
-                fmt_forward_msgs.append({"type": "text", "data": {"text": f"----------{'>'*step} 转发结束 ----------\n"}})
-                messages, at_list, _ = await message_elements_wrapper(context, fmt_forward_msgs, chat, 1)
-                return messages, at_list, None
+                fmt_forward_msgs = await forward_msgs_wrapper(context, forward_msgs['messages'], chat, 1)
+                fmt_forward_msgs.insert(0, self.msg_decorator.qq_text_simple_wrapper("---------- 合并转发消息 ----------\n", {}))
+                fmt_forward_msgs.append(self.msg_decorator.qq_text_simple_wrapper("\n-----------------------------------------", {}))
+                return fmt_forward_msgs, at_list, None
             else:
                 messages.extend(self.call_msg_decorator(msg_type, msg_data, chat))
             if main_text != "":
@@ -200,13 +215,13 @@ class GoCQHttp(BaseClient):
             return messages, at_list, target
 
         async def message_elements_wrapper(
-            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat, step=1
+            context: Dict[str, Any], msg_elements: List[Dict[str, Any]], chat: Chat, step=1, forward=False
         ) -> Tuple[List[Message], Dict[Tuple[int, int], Union[Chat, ChatMember]], Any]:
             messages: List[Message] = []
             at_dict: Dict[Tuple[int, int], Union[Chat, ChatMember]] = {}
             target = None
             for msg_element in msg_elements:
-                sub_messages, sub_at_list, target_ = await message_element_wrapper(context, msg_element, chat, step)
+                sub_messages, sub_at_list, target_ = await message_element_wrapper(context, msg_element, chat, step, forward)
                 if target_:
                     target = target_
                 for at_tuple in sub_at_list:
@@ -216,20 +231,28 @@ class GoCQHttp(BaseClient):
                     )
                     at_dict[pos] = at_tuple[1]
                 messages.extend(sub_messages)
+
             # merge text messages
             if len(messages) > 1:
                 res = []
                 text = ""
+                forward_ = False
                 for msg in messages:
                     if msg.text != "":
                         text += msg.text
                     else:
-                        res.append(self.msg_decorator.qq_text_simple_wrapper(text, at_dict))
+                        res.append(self.msg_decorator.qq_text_simple_wrapper(text, {}, forward_))
                         res.append(msg)
                         text = ""
+                        forward_ = msg.vendor_specific.get("disable_header", False)
                 if text != "":
-                    res.append(self.msg_decorator.qq_text_simple_wrapper(text, at_dict))
+                    res.append(self.msg_decorator.qq_text_simple_wrapper(text, {}, forward_))
                 messages = res
+            if forward:
+                for msg in messages:
+                    msg.vendor_specific["disable_header"] = True
+            # filter empty messages
+            messages = [msg for msg in messages if msg.text.strip() != "" or msg.file is not None or not msg.vendor_specific.get("disable_header", False)]
             return messages, at_dict, target
 
         @self.coolq_bot.on_message
