@@ -99,7 +99,11 @@ class GoCQHttp(BaseClient):
         asyncio.set_event_loop(self.loop)
 
         async def get_msg(id):
-            return await self.coolq_api_query("get_msg", message_id=id)
+            try:
+                return await self.coolq_api_query("get_msg", message_id=id)
+            except Exception as e:
+                print(e)
+                return None
 
         async def forward_msgs_wrapper(context, msg_elements: List[Dict[str, Any]], chat, step) -> List[Dict[str, Any]]:
             fmt_msgs: List[Dict] = []
@@ -185,6 +189,8 @@ class GoCQHttp(BaseClient):
                 else:
                     try:
                         target_msg = await get_msg(msg_data["id"])
+                        if target_msg is None:
+                            raise Exception("Message not found")
                         target = {
                             "message": Message(chat=chat, uid=MessageID(f"{chat.uid.split('_')[-1]}_{msg_data['id']}")),
                             "sender": target_msg['sender'],
@@ -192,7 +198,7 @@ class GoCQHttp(BaseClient):
                         }
                     except Exception as e:
                         self.logger.exception(e)
-                        main_text = f'#{msg_data["id"]}」\n------------------------------\n'
+                        main_text = f'「引用未知消息#{msg_data["id"]}」\n------------------------------\n'
                         target = None
             elif msg_type == "forward":
                 resid = msg_data['id']
@@ -306,12 +312,17 @@ class GoCQHttp(BaseClient):
                         msg_elements = msg_elements[1:]
                     if msg_elements[0].get("type") == "text" and msg_elements[0]['data']['text'].startswith(" "):
                         msg_elements[0]['data']['text'] = msg_elements[0]['data']['text'].lstrip()
+                    if msg_elements[0].get("type") == "text" and msg_elements[0]['data']['text'].strip() == "":
+                        msg_elements = msg_elements[1:]
+                    print(repr(msg_elements))
                     messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
-                elif msg_elements[0].get("type") == "reply":
-                    msg_elements = msg_elements[1:]
-                    if len(msg_elements) >= 3 and msg_elements[0].get("type") == "at" and msg_elements[2].get("type") == "at" and msg_elements[0]['data']['qq'] == msg_elements[2]['data']['qq']:
-                        msg_elements = msg_elements[2:]
-                    messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
+                # elif msg_elements[0].get("type") == "reply":
+                #     msg_elements = msg_elements[1:]
+                #     if len(msg_elements) >= 3 and msg_elements[0].get("type") == "at" and msg_elements[2].get("type") == "at" and msg_elements[0]['data']['qq'] == msg_elements[2]['data']['qq']:
+                #         msg_elements = msg_elements[2:]
+                #     print(msg_elements)
+                #     messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
+
                 coolq_msg_id = context["message_id"]
                 for i in range(len(messages)):
                     if not isinstance(messages[i], Message):
@@ -535,7 +546,6 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_request("friend")  # Add friend request
         async def handle_add_friend_request(context: Event):
-            self.logger.debug(repr(context))
             context["event_description"] = "\u2139 好友添加请求"
             context["uid_prefix"] = "friend_request"
             text = (
@@ -731,7 +741,10 @@ class GoCQHttp(BaseClient):
         chat_type = msg.chat.uid.split("_")
         reply_cq = ''
         if msg.target is not None:
-            target_id = msg.target.uid.split("_")[1]
+            if msg.target.uid.find('_') != -1:
+                target_id = msg.target.uid.split("_")[1]
+            else:
+                target_id = msg.target.uid.split(".")[0]
             reply_cq = f'[CQ:reply,id={target_id}]'
         self.logger.debug("[%s] Is edited: %s", msg.uid, msg.edit)
         if msg.edit:
@@ -809,7 +822,7 @@ class GoCQHttp(BaseClient):
             tmpFilename = tempfile.mktemp()
             with open(tmpFilename, 'wb') as f:
                 f.write(filedata)
-            rtext = '[CQ:video,file=file:///%s]' % tmpFilename
+            rtext = '[CQ:video,file=file://%s]' % tmpFilename
             asyncio.run(self.coolq_send_message(chat_type[0], chat_type[1], reply_cq + rtext))
         return msg
 
@@ -1124,8 +1137,11 @@ class GoCQHttp(BaseClient):
             # if not isinstance(status.message.author, SelfChatMember):
             #     raise EFBMessageError(("You can only recall your own messages."))
             try:
-                uid_type = status.message.uid.split("_")
-                asyncio.run(self.recall_message(uid_type[1]))
+                if status.message.uid.find("_") != -1:
+                    uid_type = status.message.uid.split("_")[1]
+                    asyncio.run(self.recall_message(uid_type))
+                else:
+                    raise EFBMessageError(("暂不支持撤回此消息"))
             except CoolQAPIFailureException:
                 raise EFBMessageError(("撤回消息失败：无权限或消息已过期。"))
         else:
