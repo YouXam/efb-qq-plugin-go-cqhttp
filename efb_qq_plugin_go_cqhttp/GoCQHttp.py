@@ -238,22 +238,17 @@ class GoCQHttp(BaseClient):
                     at_dict[pos] = at_tuple[1]
                 messages.extend(sub_messages)
 
-            # merge text messages
+            # merge text messages and merge text message to previous image message(if exists)
             if len(messages) > 1:
-                res = []
-                text = ""
-                forward_ = False
-                for msg in messages:
-                    if msg.text != "":
-                        text += msg.text
-                    else:
-                        res.append(self.msg_decorator.qq_text_simple_wrapper(text, {}, forward_))
-                        res.append(msg)
-                        text = ""
-                        forward_ = msg.vendor_specific.get("disable_header", False)
-                if text != "":
-                    res.append(self.msg_decorator.qq_text_simple_wrapper(text, {}, forward_))
-                messages = res
+                for i in range(len(messages) - 1, 0, -1):
+                    if messages[i].text != '' and messages[i - 1].text != '' and messages[i - 1].file is None:
+                        messages[i - 1].text += messages[i].text
+                        messages.pop(i)
+                    elif messages[i].text != '' and messages[i].file is None and messages[i - 1].file is not None:
+                        messages[i - 1].text += messages[i].text
+                        messages.pop(i)
+
+            # disable header for forward message
             if forward:
                 for msg in messages:
                     msg.vendor_specific["disable_header"] = True
