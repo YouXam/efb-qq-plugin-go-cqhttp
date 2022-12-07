@@ -314,7 +314,8 @@ class GoCQHttp(BaseClient):
                         msg_elements[0]['data']['text'] = msg_elements[0]['data']['text'].lstrip()
                     if msg_elements[0].get("type") == "text" and msg_elements[0]['data']['text'].strip() == "":
                         msg_elements = msg_elements[1:]
-                    print(repr(msg_elements))
+                    if len(msg_elements) >= 3 and msg_elements[0].get("type") == "at" and msg_elements[2].get("type") == "at" and msg_elements[0]['data']['qq'] == msg_elements[2]['data']['qq']:
+                        msg_elements = msg_elements[2:]
                     messages, at_dict, _ = await message_elements_wrapper(context, msg_elements, chat)
                 # elif msg_elements[0].get("type") == "reply":
                 #     msg_elements = msg_elements[1:]
