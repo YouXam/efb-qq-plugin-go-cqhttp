@@ -146,7 +146,7 @@ class GoCQHttp(BaseClient):
         ) -> Tuple[List[Message], List[Tuple[Tuple[int, int], Union[Chat, ChatMember]]], Any]:
             if isinstance(msg_element, Message):
                 return [msg_element], [], None
-            if msg_element.get("type") is None and msg_element.get("content"):
+            if isinstance(msg_element, dict) and msg_element.get("type") is None and msg_element.get("content"):
                 fmt_forward_msgs = await forward_msgs_wrapper(context, [msg_element], chat, step)
                 return fmt_forward_msgs, [], None
             msg_type = msg_element["type"]
