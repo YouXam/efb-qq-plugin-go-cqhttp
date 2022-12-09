@@ -75,6 +75,8 @@ class GoCQHttp(BaseClient):
     prev_message_list: List[str] = []
     prev_message_dict = {}
 
+    handled_message_list: List[str] = []
+    handled_message_dict = {}
     # coolq_prev_message_list: List[str] = []
     # coolq_prev_message_dict = {}
     user_id: int = 0
@@ -258,6 +260,15 @@ class GoCQHttp(BaseClient):
 
         @self.coolq_bot.on_message
         async def handle_msg(context: Event):
+            msg_id = context["message_id"]
+            if self.handled_message_dict.get(msg_id):
+                return
+            self.handled_message_dict[msg_id] = True
+            self.handled_message_list.append(msg_id)
+            if len(self.handled_message_list) > 1100:
+                for i in range(100):
+                    self.handled_message_dict.pop(self.handled_message_list.pop(0))
+
             async def _handle_msg():
                 self.logger.debug(repr(context))
                 msg_elements = context["message"]
